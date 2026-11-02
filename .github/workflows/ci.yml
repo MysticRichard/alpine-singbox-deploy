@@ -1,0 +1,29 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck (POSIX sh)
+        run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:stable -s sh /mnt/alpine-singbox.sh
+      - name: Alpine ash syntax
+        run: docker run --rm -v "$PWD:/mnt:ro" alpine:3.23 sh -n /mnt/alpine-singbox.sh
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Alpine 3.23 install regression
+        run: |
+          docker run --rm --init --privileged -v "$PWD:/work" alpine:3.23 sh -c '
+            apk add --no-cache openrc >/dev/null 2>&1
+            mkdir -p /run/openrc
+            touch /run/openrc/softlevel
+            touch /DISPOSABLE_ALPINE_TEST
+            cd /work && sh tests/test-install.sh
+          '
