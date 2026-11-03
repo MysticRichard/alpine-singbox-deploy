@@ -1,12 +1,12 @@
 # 公共规则与客户端私有规则
 
-新装内置 8,633 条公共规则，按原顺序写入订阅。规则由 FlClash/Mihomo 在客户端执行，不加载进 VPS 的 sing-box 核心；服务器仅托管 YAML 文件。
+新装内置 8,626 条公共规则（已剔除 7 条个人公网 IP 直连规则），按原顺序写入订阅。规则由 FlClash/Mihomo 在客户端执行，不加载进 VPS 的 sing-box 核心；服务器仅托管 YAML 文件。
 
 ## 来源与隐私复核
 
 来源为同一维护者的 Debian 项目 `personal-xray-deploy` 中已脱敏的 `rules.template.yaml`，本次迁移不读取含凭据的完整客户端配置。
 
-- 模板 SHA256：`b284b1a909b8edcac96db1b07f384dd875e134e199b98ec3f7615200133d6bd1`。
+- 模板 SHA256：`11e6d6afe2f73a9739835421e67fcc3186df57bfcb365436d6363ff12b97bf5c`。
 - 保留所有条目及原顺序，最后仅有一条 `MATCH,PROXY`。
 - 保留通用保留网段（例如 `192.168.0.0/16`、`100.64.0.0/10`），它们是通用路由策略，不包含个人设备的具体地址。
 - `172.16.102.56/32` 是公共 TeamViewer 规则，已与 [ACL4SSR 的 TeamViewer.list](https://github.com/ACL4SSR/ACL4SSR/blob/master/Clash/Ruleset/TeamViewer.list) 核对；不是个人设备地址。

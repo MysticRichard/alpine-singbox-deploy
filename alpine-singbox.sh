@@ -735,14 +735,7 @@ write_default_rules() {
 - DOMAIN-SUFFIX,zmzapi.net,DIRECT
 - DOMAIN-SUFFIX,zmzfile.com,DIRECT
 - DOMAIN-SUFFIX,teamviewer.com,DIRECT
-- IP-CIDR,139.220.243.27/32,DIRECT,no-resolve
 - IP-CIDR,172.16.102.56/32,DIRECT,no-resolve
-- IP-CIDR,185.188.32.1/28,DIRECT,no-resolve
-- IP-CIDR,221.226.128.146/32,DIRECT,no-resolve
-- IP-CIDR6,2a0b:b580::/48,DIRECT,no-resolve
-- IP-CIDR6,2a0b:b581::/48,DIRECT,no-resolve
-- IP-CIDR6,2a0b:b582::/48,DIRECT,no-resolve
-- IP-CIDR6,2a0b:b583::/48,DIRECT,no-resolve
 - DOMAIN-SUFFIX,baomitu.com,DIRECT
 - DOMAIN-SUFFIX,bootcss.com,DIRECT
 - DOMAIN-SUFFIX,jiasule.com,DIRECT
@@ -8959,6 +8952,8 @@ validate_rules() {
   # Do not print rejected content: it could contain a pasted private rule.
   awk '
     function ipv4(value, a,n,i) {
+      # BusyBox awk split(".") is not a reliable IPv4 test; anchor first.
+      if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
       n=split(value,a,".")
       if (n!=4) return 0
       for (i=1;i<=4;i++) if (a[i]!~/^[0-9]+$/ || a[i]+0>255) return 0
@@ -9182,6 +9177,8 @@ validate_rules() {
   # Do not print rejected content: it could contain a pasted private rule.
   awk '
     function ipv4(value, a,n,i) {
+      # BusyBox awk split(".") is not a reliable IPv4 test; anchor first.
+      if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
       n=split(value,a,".")
       if (n!=4) return 0
       for (i=1;i<=4;i++) if (a[i]!~/^[0-9]+$/ || a[i]+0>255) return 0

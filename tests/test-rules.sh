@@ -22,7 +22,7 @@ SUB_TOKEN=0123456789abcdef0123456789abcdef
 
 seed_rules
 cmp "$RULES" "$root/rules.template.yaml"
-[ "$(grep -c '^- ' "$RULES")" -eq 8633 ]
+[ "$(grep -c '^- ' "$RULES")" -eq 8626 ]
 render_subscription
 sed -n '/^rules:$/,$p' "$SUB_ROOT/$SUB_TOKEN.yaml" | sed '1d' > "$work/rendered"
 grep '^- ' "$RULES" > "$work/expected"
@@ -57,4 +57,4 @@ render_subscription
 if grep -q 'private-device.example.invalid' "$SUB_ROOT/$SUB_TOKEN.yaml"; then exit 1; fi
 # Numeric short IDs must remain strings in YAML.
 grep -q 'short-id: "1234567890123456"' "$SUB_ROOT/$SUB_TOKEN.yaml"
-echo 'PASS: 8633 public rules in order; edits retained; atomic updates reject bad rules; no private-file merge'
+echo 'PASS: 8626 public rules in order; edits retained; atomic updates reject bad rules; no private-file merge'

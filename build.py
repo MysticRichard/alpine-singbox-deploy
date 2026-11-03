@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parent
 source = (ROOT / 'src/alpine-singbox.sh.in').read_text(encoding='utf-8')
 rules = (ROOT / 'rules.template.yaml').read_text(encoding='utf-8')
 assert '__ALPINE_PUBLIC_RULES__' not in rules
-assert len([line for line in rules.splitlines() if line.startswith('- ')]) == 8633
+assert len([line for line in rules.splitlines() if line.startswith('- ')]) == 8626
 assert rules.rstrip().endswith('- MATCH,PROXY')
 
 
@@ -34,4 +34,4 @@ if '--check' in sys.argv:
     print('PASS: single-file bundle matches source and public rules')
 else:
     out.write_bytes(result.encode('utf-8'))
-    print('Built alpine-singbox.sh (8633 public rules; private overrides excluded)')
+    print('Built alpine-singbox.sh (8626 public rules; private overrides excluded)')

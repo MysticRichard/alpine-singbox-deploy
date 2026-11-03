@@ -23,7 +23,7 @@ token=$(cat /etc/singbox-sub/token)
 curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/sub.yaml || { echo 'FAIL: subscription not served'; exit 1; }
 grep -q 'flow: xtls-rprx-vision' /tmp/sub.yaml || { echo 'FAIL: Vision missing'; exit 1; }
 grep -q 'reality-opts:' /tmp/sub.yaml || { echo 'FAIL: REALITY missing'; exit 1; }
-[ "$(grep -c '^- ' /tmp/sub.yaml)" -eq 8633 ] || { echo 'FAIL: full public rules missing'; exit 1; }
+[ "$(grep -c '^- ' /tmp/sub.yaml)" -eq 8626 ] || { echo 'FAIL: full public rules missing'; exit 1; }
 # Only test containers install Python/YAML; production needs neither.
 python3 tests/check-profile.py /tmp/sub.yaml /etc/sing-box/state rules.template.yaml
 cp /etc/singbox-sub/token /tmp/token-before
