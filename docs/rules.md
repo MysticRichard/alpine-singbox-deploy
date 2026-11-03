@@ -4,16 +4,16 @@
 
 ## 来源与隐私复核
 
-来源为同一维护者的 Debian 项目 `personal-xray-deploy` 中已脱敏的 `rules.template.yaml`，本次迁移不读取含凭据的完整客户端配置。
+来源为同一维护者的 Debian 项目 `personal-xray-deploy` 的 `rules.template.yaml`。本次迁移不读取含凭据的完整客户端配置，并进一步剔除其中 7 条个人公网 IP 直连规则。
 
 - 模板 SHA256：`11e6d6afe2f73a9739835421e67fcc3186df57bfcb365436d6363ff12b97bf5c`。
-- 保留所有条目及原顺序，最后仅有一条 `MATCH,PROXY`。
+- 保留其余条目及原顺序，最后仅有一条 `MATCH,PROXY`。
 - 保留通用保留网段（例如 `192.168.0.0/16`、`100.64.0.0/10`），它们是通用路由策略，不包含个人设备的具体地址。
 - `172.16.102.56/32` 是公共 TeamViewer 规则，已与 [ACL4SSR 的 TeamViewer.list](https://github.com/ACL4SSR/ACL4SSR/blob/master/Clash/Ruleset/TeamViewer.list) 核对；不是个人设备地址。
 - 模板中 DDNS 域名 `tr4ck3r.duckdns.org` 已与 [公开 trackerslist](https://github.com/ngosang/trackerslist/blob/master/trackers_all.txt) 核对；不是个人自有域名。
 - 具体 NAS/内网设备地址、个人 Tailscale 地址和自有域名继续保存在客户端本地，不加入公开模板。
 
-复核日期：2026年11月2日。当前设备未找到原始完整私有配置，因此不能声称重新逐条比对了全部个人规则。已有本地覆写应继续保留；此修复只迁移已脱敏公共模板。
+复核日期：2026年11月2日。当前设备未找到原始完整私有配置，因此不能声称重新逐条比对了全部个人规则。已有本地覆写应继续保留；此修复迁移公共规则，并剔除已确认的 7 条个人公网 IP。
 
 ## VPS 公共规则
 

@@ -89,7 +89,7 @@
 
 ## 公共规则修复（2026年11月2日）
 
-- 完整迁移 Debian 版已脱敏的 8,626 条公共规则（已剔除 7 条个人公网 IP 直连规则），原文件 SHA256 为 `11e6d6afe2f73a9739835421e67fcc3186df57bfcb365436d6363ff12b97bf5c`。
+- 基于 Debian 版公共规则，剔除 7 条个人公网 IP 后迁移 8,626 条，原文件 SHA256 为 `11e6d6afe2f73a9739835421e67fcc3186df57bfcb365436d6363ff12b97bf5c`。
 - `alpine-singbox.sh` 内置模板；`src/alpine-singbox.sh.in` 和 `build.py` 保证单文件入口与源模板一致。
 - `/etc/singbox-sub/rules.yaml` 保存公共规则；首次创建、重装保留，错误文件拒绝发布。
 - `sb-admin --update-sub` 使用同一渲染逻辑，原子替换 HTTP 订阅；个人设备规则不会自动合并。
