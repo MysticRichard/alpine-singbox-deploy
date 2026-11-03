@@ -9,6 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Public rules and generated bundle
+        run: |
+          python3 build.py --check
+          python3 tests/check-public-rules.py
+          docker run --rm -v "$PWD:/work:ro" alpine:3.23 sh /work/tests/test-rules.sh
       - name: ShellCheck (POSIX sh)
         run: docker run --rm -v "$PWD:/mnt:ro" koalaman/shellcheck:stable -s sh /mnt/alpine-singbox.sh
       - name: Alpine ash syntax
@@ -21,7 +26,7 @@ jobs:
       - name: Alpine 3.23 install regression
         run: |
           docker run --rm --init --privileged -v "$PWD:/work" alpine:3.23 sh -c '
-            apk add --no-cache openrc >/dev/null 2>&1
+            apk add --no-cache openrc python3 py3-yaml >/dev/null 2>&1
             mkdir -p /run/openrc
             touch /run/openrc/softlevel
             touch /DISPOSABLE_ALPINE_TEST

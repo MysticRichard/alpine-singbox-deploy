@@ -1,6 +1,6 @@
 # 设计与取舍
 
-日期：2026-11-02。目标环境：Alpine 3.23 / OpenRC / x86_64 / 1 vCPU / 128 MB / NAT VPS。
+日期：2026年11月2日。目标环境：Alpine 3.23 / OpenRC / x86_64 / 1 vCPU / 128 MB / NAT VPS。
 
 ## 目标
 
@@ -66,7 +66,7 @@
 
 ## 验证记录
 
-环境：`alpine:3.23` 容器（OpenRC，x86_64），2026-11-02。
+环境：`alpine:3.23` 容器（OpenRC，x86_64），2026年11月2日。
 
 已通过：
 
@@ -86,6 +86,17 @@
 - FlClash/mihomo 实际导入该订阅
 - 不同目标站（Cloudflare/Samsung 等）的长期稳定性
 - 128 MB 实机长时间运行的内存曲线
+
+## 公共规则修复（2026年11月2日）
+
+- 完整迁移 Debian 版已脱敏的 8,633 条公共规则，原文件 SHA256 为 `b284b1a909b8edcac96db1b07f384dd875e134e199b98ec3f7615200133d6bd1`。
+- `alpine-singbox.sh` 内置模板；`src/alpine-singbox.sh.in` 和 `build.py` 保证单文件入口与源模板一致。
+- `/etc/singbox-sub/rules.yaml` 保存公共规则；首次创建、重装保留，错误文件拒绝发布。
+- `sb-admin --update-sub` 使用同一渲染逻辑，原子替换 HTTP 订阅；个人设备规则不会自动合并。
+- 修正纯数字 short-id 的 YAML 类型：始终输出字符串。
+- 本轮通过：逐条规则顺序对比、YAML 解析、Mihomo v1.19.33 配置测试、完整安装/订阅/代理自检、保留自定义公共规则的重装、错误规则保留旧订阅、卸载。
+- 1 CPU / 128 MiB（禁用额外 swap）隔离容器完成安装、REALITY/Vision 代理与 8,633 条 HTTP 订阅；采样 `memory.current=82542592` bytes，`oom=0`、`oom_kill=0`。这是一次测试采样，不是长期峰值保证。
+- 当前设备没有原始完整私有客户端配置；沿用已脱敏模板，不宣称已迁移或逐条重新审查全部原始个人规则。详见 [规则说明](rules.md)。
 
 ## 已知问题
 

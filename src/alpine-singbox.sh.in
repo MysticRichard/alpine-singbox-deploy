@@ -1,0 +1,737 @@
+#!/bin/sh
+# Alpine 3.23+ / OpenRC / x86_64 NAT VPS
+# sing-box (official Alpine package) + VLESS + REALITY + Vision.
+# One command, a few ports, one Clash/Mihomo subscription URL. No panel.
+set -eu
+umask 077
+
+SB_ETC=/etc/sing-box
+SB_CONFIG=$SB_ETC/config.json
+SB_STATE=$SB_ETC/state
+SUB_ETC=/etc/singbox-sub
+SUB_ROOT=/srv/singbox-sub
+SUB_TOKEN_FILE=$SUB_ETC/token
+SUB_PORT_FILE=$SUB_ETC/port
+RULES=$SUB_ETC/rules.yaml
+UPDATER=/usr/local/sbin/sb-sub
+ADMIN=/usr/local/sbin/sb-admin
+BACKUP_ROOT=/root/singbox-backups
+
+fail() { printf 'ERROR: %s\n' "$*" >&2; FAILED=1; exit 1; }
+info() { printf '%s\n' "$*" >&2; }
+
+usage() {
+  cat <<'USAGE'
+用法：
+  sh alpine-singbox.sh                 交互安装（推荐）
+  sh alpine-singbox.sh --yes ...       无人值守安装
+  sh alpine-singbox.sh --verify        自检已安装节点
+  sh alpine-singbox.sh --uninstall     卸载配置与服务（保留备份）
+  sh alpine-singbox.sh --help
+
+参数：
+  --server IP_OR_HOST       公网地址
+  --port PORT               代理公网 TCP 端口
+  --listen-port PORT        代理内部 TCP 端口
+  --sub-port PORT           订阅公网 TCP 端口
+  --sub-listen-port PORT    订阅内部 TCP 端口（>=1024）
+  --target HOST:PORT        REALITY 目标，默认 www.apple.com:443
+  --sni NAME                serverName，默认跟随目标
+  --yes                     无人值守；所有必填项必须给出
+  --uninstall [--purge]     卸载；--purge 同时删除 /etc/singbox-sub
+  --verify                  临时客户端实测链路
+  --update-sub              从 /etc/singbox-sub/rules.yaml 重新生成订阅
+USAGE
+}
+
+ACTION=install
+PURGE=0
+SERVER_ADDRESS=${SERVER_ADDRESS:-}
+PUBLIC_PORT=${PUBLIC_PORT:-}
+LISTEN_PORT=${LISTEN_PORT:-}
+SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-}
+SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-}
+REALITY_DEST=${REALITY_DEST:-}
+REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-}
+NONINTERACTIVE=${NONINTERACTIVE:-0}
+FAILED=0
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    --server) SERVER_ADDRESS=${2:-}; shift 2 || fail '--server 缺少值';;
+    --port) PUBLIC_PORT=${2:-}; shift 2 || fail '--port 缺少值';;
+    --listen-port) LISTEN_PORT=${2:-}; shift 2 || fail '--listen-port 缺少值';;
+    --sub-port) SUB_PUBLIC_PORT=${2:-}; shift 2 || fail '--sub-port 缺少值';;
+    --sub-listen-port) SUB_LISTEN_PORT=${2:-}; shift 2 || fail '--sub-listen-port 缺少值';;
+    --target) REALITY_DEST=${2:-}; shift 2 || fail '--target 缺少值';;
+    --sni) REALITY_SERVER_NAME=${2:-}; shift 2 || fail '--sni 缺少值';;
+    --yes) NONINTERACTIVE=1; shift;;
+    --uninstall) ACTION=uninstall; shift;;
+    --purge) PURGE=1; shift;;
+    --verify) ACTION=verify; shift;;
+    --update-sub) ACTION=update-sub; shift;;
+    -h|--help) usage; exit 0;;
+    *) fail "未知参数：$1（用 --help 查看用法）";;
+  esac
+done
+
+valid_port() {
+  case ${1:-} in ''|*[!0-9]*) return 1;; esac
+  [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null
+}
+
+valid_host() {
+  case ${1:-} in ''|*[!A-Za-z0-9.-]*) return 1;; esac
+  return 0
+}
+
+need_root() { [ "$(id -u)" -eq 0 ] || fail '请用 root 运行'; }
+
+need_alpine() {
+  [ -f /etc/alpine-release ] || fail '仅支持 Alpine Linux'
+  command -v rc-service >/dev/null 2>&1 || fail '需要 OpenRC（rc-service）'
+  [ "$(uname -m)" = x86_64 ] || fail '当前仅支持 x86_64'
+}
+
+# Prompts read from the terminal even when the script arrives through a pipe.
+TTY_FD=0
+if [ "$ACTION" = install ] && [ "$NONINTERACTIVE" != 1 ] && [ ! -t 0 ]; then
+  if exec 3</dev/tty 2>/dev/null; then TTY_FD=3; else
+    fail '需要交互终端：请用 ssh -t 或 bash <(curl ...) 运行'
+  fi
+fi
+
+ask() {
+  _label=$1; _def=${2:-}; _ans=
+  while :; do
+    if [ -n "$_def" ]; then printf '%s [%s]: ' "$_label" "$_def" >&2; else printf '%s: ' "$_label" >&2; fi
+    if [ "$TTY_FD" = 3 ]; then IFS= read -r _ans <&3 || fail '读取输入失败'; else IFS= read -r _ans || fail '读取输入失败'; fi
+    _ans=${_ans:-$_def}
+    [ -n "$_ans" ] && break
+    printf '不能为空\n' >&2
+  done
+  printf '%s' "$_ans"
+}
+
+load_state() {
+  if [ -f "$SB_STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$SB_STATE"
+  fi
+}
+
+save_state() {
+  {
+    printf 'SERVER_ADDRESS=%s\n' "$SERVER_ADDRESS"
+    printf 'PUBLIC_PORT=%s\n' "$PUBLIC_PORT"
+    printf 'LISTEN_PORT=%s\n' "$LISTEN_PORT"
+    printf 'SUB_PUBLIC_PORT=%s\n' "$SUB_PUBLIC_PORT"
+    printf 'SUB_LISTEN_PORT=%s\n' "$SUB_LISTEN_PORT"
+    printf 'REALITY_DEST=%s\n' "$REALITY_DEST"
+    printf 'REALITY_SERVER_NAME=%s\n' "$REALITY_SERVER_NAME"
+    printf 'CLIENT_UUID=%s\n' "$CLIENT_UUID"
+    printf 'PRIVATE_KEY=%s\n' "$PRIVATE_KEY"
+    printf 'PUBLIC_KEY=%s\n' "$PUBLIC_KEY"
+    printf 'SHORT_ID=%s\n' "$SHORT_ID"
+  } > "$SB_STATE"
+  chmod 600 "$SB_STATE"
+}
+
+validate() {
+  valid_host "$SERVER_ADDRESS" || fail '公网地址只能是 IPv4 或域名'
+  valid_port "$PUBLIC_PORT" || fail '代理公网端口无效'
+  valid_port "$LISTEN_PORT" || fail '代理内部端口无效'
+  valid_port "$SUB_PUBLIC_PORT" || fail '订阅公网端口无效'
+  valid_port "$SUB_LISTEN_PORT" || fail '订阅内部端口无效'
+  [ "$SUB_LISTEN_PORT" -ge 1024 ] || fail '订阅内部端口必须 >=1024'
+  [ "$PUBLIC_PORT" != "$SUB_PUBLIC_PORT" ] || fail '代理和订阅的公网端口不能相同'
+  [ "$LISTEN_PORT" != "$SUB_LISTEN_PORT" ] || fail '代理和订阅的内部端口不能相同'
+  case $REALITY_DEST in *:*) ;; *) fail 'REALITY 目标格式应为 host:port';; esac
+  DEST_HOST=${REALITY_DEST%:*}
+  DEST_PORT=${REALITY_DEST##*:}
+  valid_host "$DEST_HOST" || fail 'REALITY 目标主机无效'
+  valid_port "$DEST_PORT" || fail 'REALITY 目标端口无效'
+  [ -n "$REALITY_SERVER_NAME" ] || REALITY_SERVER_NAME=$DEST_HOST
+  [ "$REALITY_SERVER_NAME" = "$DEST_HOST" ] || fail 'serverName 必须与目标主机一致'
+}
+
+port_busy() {
+  netstat -ltn 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {f=1} END{exit !f}'
+}
+
+# start-stop-daemon can leave a stale pidfile when a process died in a
+# container. Clear it only when the PID is gone, a zombie, or another program.
+stop_service() {
+  _svc=$1
+  _pidfile=/run/$_svc.pid
+  timeout 10 rc-service --ifstarted "$_svc" stop >/dev/null 2>&1 || true
+  if [ -f "$_pidfile" ]; then
+    _pid=$(cat "$_pidfile" 2>/dev/null || true)
+    if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+      case $(cat "/proc/$_pid/comm" 2>/dev/null || true) in
+        *sing-box*|*busybox*|*httpd*) ;;
+        *) rm -f "$_pidfile";;
+      esac
+      case $(awk '{print $3}' "/proc/$_pid/stat" 2>/dev/null || true) in
+        Z) rm -f "$_pidfile";;
+      esac
+    else
+      rm -f "$_pidfile"
+    fi
+  fi
+}
+
+start_service() {
+  _svc=$1
+  _pidfile=/run/$_svc.pid
+  if [ -f "$_pidfile" ]; then
+    _pid=$(cat "$_pidfile" 2>/dev/null || true)
+    if [ -z "$_pid" ] || ! kill -0 "$_pid" 2>/dev/null; then rm -f "$_pidfile"; fi
+  fi
+  timeout 20 rc-service "$_svc" start
+}
+
+check_target_tls() {
+  probe=$(openssl s_client -4 -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" \
+    -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) || {
+      printf '%s\n' "$probe" | tail -15 >&2
+      fail 'REALITY 目标 TLS 校验失败（检查 VPS 时间、CA 和目标站）'
+    }
+  case $probe in *TLSv1.3*) ;; *) fail 'REALITY 目标未协商 TLS1.3';; esac
+  case $probe in *'ALPN protocol: h2'*) ;; *) fail 'REALITY 目标未协商 h2';; esac
+}
+
+ensure_repo() {
+  if ! grep -q '/community' /etc/apk/repositories 2>/dev/null; then
+    rel=$(cat /etc/alpine-release)
+    branch=v${rel%.*}
+    printf '%s\n' "https://dl-cdn.alpinelinux.org/alpine/$branch/community" >> /etc/apk/repositories
+    apk update >/dev/null 2>&1 || fail 'apk update 失败'
+  fi
+}
+
+ensure_pkg() {
+  if ! command -v curl >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    apk add --no-cache ca-certificates curl openssl >/dev/null 2>&1 || fail '依赖安装失败'
+  fi
+  if ! apk info -e sing-box >/dev/null 2>&1; then
+    apk add --no-cache sing-box sing-box-openrc >/dev/null 2>&1 \
+      || fail '当前 Alpine 仓库没有 sing-box；请使用 Alpine 3.23+'
+  fi
+  if ! command -v httpd >/dev/null 2>&1; then
+    apk add --no-cache busybox-extras >/dev/null 2>&1 || fail 'busybox-extras 安装失败（需要 httpd）'
+  fi
+  command -v sing-box >/dev/null 2>&1 || fail 'sing-box 未安装成功'
+  command -v httpd >/dev/null 2>&1 || fail 'httpd 不可用'
+}
+
+preflight() {
+  need_root
+  need_alpine
+  for c in curl openssl awk sed grep netstat; do
+    command -v "$c" >/dev/null 2>&1 || fail "缺少 $c"
+  done
+  free_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+  [ "${free_kb:-0}" -ge 50000 ] || fail '根分区可用空间不足 50 MB'
+  if port_busy "$LISTEN_PORT"; then
+    old_port=
+    [ -f "$SB_STATE" ] && old_port=$(sed -n 's/^LISTEN_PORT=//p' "$SB_STATE" 2>/dev/null)
+    if [ "$old_port" != "$LISTEN_PORT" ]; then
+      fail "内部端口 $LISTEN_PORT 已被占用"
+    fi
+  fi
+  if port_busy "$SUB_LISTEN_PORT"; then
+    old_sub=
+    [ -f "$SB_STATE" ] && old_sub=$(sed -n 's/^SUB_LISTEN_PORT=//p' "$SB_STATE" 2>/dev/null)
+    if [ "$old_sub" != "$SUB_LISTEN_PORT" ]; then
+      fail "订阅内部端口 $SUB_LISTEN_PORT 已被占用"
+    fi
+  fi
+  info '检查 REALITY 目标 TLS1.3/h2 …'
+  check_target_tls
+  info "PASS: 目标 $REALITY_DEST（$REALITY_SERVER_NAME）"
+}
+
+snapshot() {
+  backup="$BACKUP_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  mkdir -p "$backup"
+  for p in "$SB_CONFIG" "$SB_STATE" /etc/conf.d/sing-box /etc/init.d/sb-sub "$ADMIN" "$UPDATER" "$SUB_ETC" /srv/singbox-sub; do
+    [ -e "$p" ] && cp -a "$p" "$backup/" 2>/dev/null || true
+  done
+  BACKUP=$backup
+}
+
+rollback() {
+  [ -n "${BACKUP:-}" ] || return 0
+  info "安装失败，正在从 $BACKUP 恢复"
+  stop_service sbox
+  stop_service sb-sub
+  for p in "$SB_CONFIG" "$SB_STATE" /etc/conf.d/sing-box /etc/init.d/sb-sub "$ADMIN" "$UPDATER" "$SUB_ETC" /srv/singbox-sub; do
+    base=${p##*/}
+    if [ -e "$BACKUP/$base" ]; then
+      rm -rf "$p"
+      cp -a "$BACKUP/$base" "$p" 2>/dev/null || true
+    fi
+  done
+  if [ "${WAS_RUNNING:-0}" = 1 ]; then start_service sbox >/dev/null 2>&1 || true; fi
+  if [ "${SUB_WAS_RUNNING:-0}" = 1 ]; then start_service sb-sub >/dev/null 2>&1 || true; fi
+}
+
+on_exit() {
+  rc=$?
+  trap - EXIT
+  if [ -n "${TMPDIR_WORK:-}" ]; then rm -rf "$TMPDIR_WORK"; fi
+  if [ "$rc" -ne 0 ] && [ "${FAILED:-0}" = 1 ]; then rollback; fi
+  exit "$rc"
+}
+trap on_exit EXIT
+
+render_config() {
+  cat > "$1" <<EOF
+{
+  "log": {"level": "warn", "timestamp": true},
+  "inbounds": [{
+    "type": "vless",
+    "tag": "vless-in",
+    "listen": "0.0.0.0",
+    "listen_port": $LISTEN_PORT,
+    "users": [{"uuid": "$CLIENT_UUID", "flow": "xtls-rprx-vision"}],
+    "tls": {
+      "enabled": true,
+      "server_name": "$REALITY_SERVER_NAME",
+      "reality": {
+        "enabled": true,
+        "handshake": {"server": "$DEST_HOST", "server_port": $DEST_PORT},
+        "private_key": "$PRIVATE_KEY",
+        "short_id": ["$SHORT_ID"]
+      }
+    }
+  }],
+  "outbounds": [{"type": "direct", "tag": "direct"}],
+  "route": {"final": "direct"}
+}
+EOF
+}
+
+# Build-time insertion: only the reviewed public template belongs here.
+write_default_rules() {
+__PUBLIC_RULES__
+}
+
+validate_rules() {
+  [ -f "$1" ] || fail '公共规则文件不存在'
+  # Do not print rejected content: it could contain a pasted private rule.
+  awk '
+    function ipv4(value, a,n,i) {
+      n=split(value,a,".")
+      if (n!=4) return 0
+      for (i=1;i<=4;i++) if (a[i]!~/^[0-9]+$/ || a[i]+0>255) return 0
+      return 1
+    }
+    function ipv6(value, halves,parts,n,i,count,compressed,side) {
+      if (value!~/^[0-9a-fA-F:]+$/) return 0
+      n=split(value,halves,"::")
+      if (n>2) return 0
+      compressed=(n==2)
+      count=0
+      for (side=1;side<=n;side++) {
+        if (halves[side]=="") {if (!compressed) return 0; continue}
+        split(halves[side],parts,":")
+        for (i=1;i<=split(halves[side],parts,":");i++) {
+          if (length(parts[i])<1 || length(parts[i])>4) return 0
+          count++
+        }
+      }
+      return compressed ? count<8 : count==8
+    }
+    function cidr(value,v6, a,n) {
+      n=split(value,a,"/")
+      if (n!=2 || a[2]!~/^[0-9]+$/ || a[2]+0>(v6?128:32)) return 0
+      return v6 ? ipv6(a[1]) : ipv4(a[1])
+    }
+    /^[[:space:]]*($|#)/ {next}
+    {
+      if ($0 !~ /^- / || $0 ~ /[\r\t]/ || index($0, ": ") || index($0, " #") || index($0, "\"")) {bad=1; next}
+      rule=substr($0,3)
+      n=split(rule,f,",")
+      if (n<2 || caught) {bad=1; next}
+      type=f[1]
+      if (type !~ /^(DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR|IP-CIDR6|GEOIP|PROCESS-NAME|AND|MATCH)$/) {bad=1; next}
+      end=n
+      if (f[end]=="no-resolve") {
+        if (type!~/^(IP-CIDR|IP-CIDR6|GEOIP)$/) bad=1
+        end--
+      }
+      if (f[end] !~ /^(DIRECT|PROXY|REJECT)$/) bad=1
+      if (type=="MATCH") {
+        if (rule!="MATCH,PROXY") bad=1
+        caught++
+      } else if (type=="AND") {
+        # shortcut: only the shipped QUIC rule is supported; extend the parser
+        # when a different logical expression is required.
+        if (rule!="AND,((DST-PORT,443),(NETWORK,UDP)),REJECT") bad=1
+      } else {
+        if (end!=3 || f[2]=="") bad=1
+        if (type=="IP-CIDR" && !cidr(f[2],0)) bad=1
+        if (type=="IP-CIDR6" && !cidr(f[2],1)) bad=1
+        if (type=="GEOIP" && f[2]!~/^([A-Za-z][A-Za-z]|LAN)$/) bad=1
+        if (type~/^DOMAIN/ && f[2]!~/^[A-Za-z0-9_.-]+$/) bad=1
+        if (type=="PROCESS-NAME" && f[2]!~/^[A-Za-z0-9_.-]+$/) bad=1
+      }
+      count++
+    }
+    END {exit (bad || count==0 || caught!=1) ? 1 : 0}
+  ' "$1" || fail '公共规则格式错误；原订阅未修改。私有规则请放 FlClash 本地覆写。'
+}
+
+seed_rules() {
+  # Even an empty edited file is user work; validate it instead of replacing it.
+  if [ ! -e "$RULES" ]; then
+    seed=$(mktemp "$SUB_ETC/.rules.XXXXXX")
+    if ! write_default_rules > "$seed"; then rm -f "$seed"; fail '生成公共规则失败'; fi
+    if ! (validate_rules "$seed"); then rm -f "$seed"; fail '内置公共规则无效'; fi
+    chmod 600 "$seed"
+    mv -f "$seed" "$RULES"
+  fi
+  validate_rules "$RULES"
+}
+
+render_subscription() {
+  validate_rules "$RULES"
+  case $SUB_TOKEN in ''|*[!a-f0-9]*) fail '订阅 token 格式错误';; esac
+  [ "${#SUB_TOKEN}" -eq 32 ] || fail '订阅 token 长度错误'
+  mkdir -p "$SUB_ROOT"
+  chmod 755 "$SUB_ROOT"
+  # Root owns the public files; the HTTP user only needs read access.
+  sub_tmp=$(mktemp "$SUB_ROOT/.subscription.XXXXXX")
+  if ! {
+  cat <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+proxies:
+  - name: "Alpine-SingBox"
+    type: vless
+    server: $SERVER_ADDRESS
+    port: $PUBLIC_PORT
+    uuid: $CLIENT_UUID
+    network: tcp
+    udp: true
+    tls: true
+    flow: xtls-rprx-vision
+    servername: $REALITY_SERVER_NAME
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: $PUBLIC_KEY
+      short-id: "$SHORT_ID"
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies: ["Alpine-SingBox"]
+rules:
+EOF
+  # Only this public rules file is read; never discover/merge private files.
+  awk '/^- / {print}' "$RULES"
+  } > "$sub_tmp"; then
+    rm -f "$sub_tmp"
+    fail '生成订阅失败，原订阅未修改'
+  fi
+  chmod 644 "$sub_tmp"
+  mv -f "$sub_tmp" "$SUB_ROOT/$SUB_TOKEN.yaml"
+}
+
+update_subscription() {
+  need_root
+  load_state
+  validate
+  [ -s "$SUB_TOKEN_FILE" ] || fail '尚未安装订阅'
+  SUB_TOKEN=$(cat "$SUB_TOKEN_FILE")
+  render_subscription
+  printf '订阅已更新：%s 条公共规则。请在 FlClash 刷新订阅。\n' "$(grep -c '^- ' "$RULES")"
+}
+
+write_services() {
+  cat > /usr/local/bin/sbox-run <<'RUN_EOF'
+#!/bin/sh
+export GOMEMLIMIT=40MiB
+export GOGC=30
+exec /usr/bin/sing-box run -D /var/lib/sing-box -C /etc/sing-box >>/var/log/sbox.log 2>&1
+RUN_EOF
+  chmod 755 /usr/local/bin/sbox-run
+
+  cat > /etc/init.d/sbox <<'SBOX_EOF'
+#!/sbin/openrc-run
+description="sing-box (alpine-singbox)"
+command="/usr/local/bin/sbox-run"
+command_background="yes"
+pidfile="/run/sbox.pid"
+depend() { need net; }
+SBOX_EOF
+
+  cat > /usr/local/bin/sb-sub-run <<RUN_EOF
+#!/bin/sh
+exec $(command -v httpd) -f -p 0.0.0.0:$SUB_LISTEN_PORT -h $SUB_ROOT >>/var/log/sb-sub.log 2>&1
+RUN_EOF
+  chmod 755 /usr/local/bin/sb-sub-run
+
+  cat > /etc/init.d/sb-sub <<'SUB_EOF'
+#!/sbin/openrc-run
+description="sing-box subscription HTTP"
+command="/usr/local/bin/sb-sub-run"
+command_background="yes"
+command_user="sbsub"
+pidfile="/run/sb-sub.pid"
+depend() { need net; }
+SUB_EOF
+  chmod 755 /etc/init.d/sbox /etc/init.d/sb-sub
+  install -m 640 -o sbsub -g sbsub /dev/null /var/log/sb-sub.log 2>/dev/null || true
+}
+
+write_sub_tool() {
+__SUB_TOOL__
+}
+
+write_admin() {
+  cat > "$ADMIN" <<'ADMIN_EOF'
+#!/bin/sh
+set -eu
+STATE=/etc/sing-box/state
+SUB_ETC=/etc/singbox-sub
+case ${1:-} in
+  --sub) . "$STATE"; printf 'http://%s:%s/%s.yaml\n' "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$(cat "$SUB_ETC/token")"; exit;;
+  --status) rc-service sbox status; exit;;
+  --update-sub) exec /usr/local/sbin/sb-sub;;
+  --uninstall) ACTION=uninstall;;
+esac
+. "$STATE"
+token=$(cat "$SUB_ETC/token")
+status() {
+  rc-service sbox status || true
+  rc-service sb-sub status || true
+  echo
+  netstat -ltn 2>/dev/null | grep -E ":(${LISTEN_PORT}|${SUB_LISTEN_PORT}) " || true
+  echo "订阅：http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$token.yaml"
+}
+restart() { rc-service sbox restart && rc-service sb-sub restart; }
+uninstall_node() {
+  printf '将停止并删除 sing-box 配置与订阅服务。输入 yes 继续: '
+  read -r ans || exit 1
+  [ "$ans" = yes ] || { echo '已取消'; exit 1; }
+  timeout 15 rc-service --ifstarted sbox stop >/dev/null 2>&1 || true
+  timeout 15 rc-service --ifstarted sb-sub stop >/dev/null 2>&1 || true
+  rc-update del sbox default >/dev/null 2>&1 || true
+  rc-update del sb-sub default >/dev/null 2>&1 || true
+  rm -f /etc/init.d/sbox /etc/init.d/sb-sub /usr/local/bin/sbox-run /usr/local/bin/sb-sub-run /usr/local/sbin/sb-admin /usr/local/sbin/sb-sub /etc/sing-box/config.json /etc/sing-box/state
+  rm -rf /srv/singbox-sub
+  echo '已卸载配置与订阅服务；/etc/singbox-sub 与 /root/singbox-backups 保留。'
+  echo '请同时删除各设备上的客户端配置。'
+}
+case ${ACTION:-menu} in
+  uninstall) uninstall_node; exit;;
+esac
+while :; do
+  cat <<MENU
+
+Alpine sing-box 管理
+  1. 状态与端口
+  2. 订阅地址
+  3. 重启服务
+  4. 卸载
+  5. 重新生成公共规则订阅
+  0. 退出
+MENU
+  printf '选择: '
+  read -r opt || exit 0
+  case $opt in
+    1) status;;
+    2) echo "http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$token.yaml";;
+    3) restart;;
+    4) uninstall_node;;
+    5) /usr/local/sbin/sb-sub || echo '规则未发布，原订阅保留';;
+    0) exit 0;;
+    *) echo '无效选项';;
+  esac
+done
+ADMIN_EOF
+  chmod 700 "$ADMIN"
+}
+
+install_node() {
+  need_root
+  need_alpine
+  ensure_repo
+  ensure_pkg
+  load_state
+  if [ "$NONINTERACTIVE" = 1 ]; then
+    [ -n "$SERVER_ADDRESS" ] && [ -n "$PUBLIC_PORT" ] && [ -n "$LISTEN_PORT" ] \
+      && [ -n "$SUB_PUBLIC_PORT" ] && [ -n "$SUB_LISTEN_PORT" ] \
+      || fail '无人值守模式缺少参数'
+    REALITY_DEST=${REALITY_DEST:-www.apple.com:443}
+    REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-${REALITY_DEST%:*}}
+  else
+    SERVER_ADDRESS=$(ask 'VPS 公网 IP 或域名' "${SERVER_ADDRESS:-}") || exit 1
+    PUBLIC_PORT=$(ask '代理公网 TCP 端口' "${PUBLIC_PORT:-}") || exit 1
+    LISTEN_PORT=$(ask '代理内部 TCP 端口（无 NAT 时与公网相同）' "${LISTEN_PORT:-}") || exit 1
+    REALITY_DEST=$(ask 'REALITY 目标 host:port' "${REALITY_DEST:-www.apple.com:443}") || exit 1
+    REALITY_SERVER_NAME=$(ask 'REALITY serverName' "${REALITY_SERVER_NAME:-${REALITY_DEST%:*}}") || exit 1
+    SUB_PUBLIC_PORT=$(ask '订阅公网 TCP 端口' "${SUB_PUBLIC_PORT:-}") || exit 1
+    SUB_LISTEN_PORT=$(ask '订阅内部 TCP 端口（>=1024）' "${SUB_LISTEN_PORT:-}") || exit 1
+  fi
+  validate
+  preflight
+  if [ -e "$RULES" ]; then validate_rules "$RULES"; fi
+
+  if [ -f "$SB_STATE" ]; then
+    # shellcheck disable=SC1090
+    . "$SB_STATE"
+  else
+    CLIENT_UUID=$(sing-box generate uuid)
+    keys=$(sing-box generate reality-keypair)
+    PRIVATE_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^PrivateKey:/ {print $2; exit}')
+    PUBLIC_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^PublicKey:/ {print $2; exit}')
+    SHORT_ID=$(openssl rand -hex 8)
+  fi
+  case $PRIVATE_KEY in *[!A-Za-z0-9_-]*|'') fail '私钥格式异常';; esac
+  case $PUBLIC_KEY in *[!A-Za-z0-9_-]*|'') fail '公钥格式异常';; esac
+  case $SHORT_ID in *[!0-9a-f]*|'') fail 'shortId 格式异常';; esac
+
+  TMPDIR_WORK=$(mktemp -d)
+  render_config "$TMPDIR_WORK/config.json"
+  sing-box check -c "$TMPDIR_WORK/config.json" >"$TMPDIR_WORK/check.log" 2>&1 || {
+    cat "$TMPDIR_WORK/check.log" >&2 || true
+    fail 'sing-box 配置校验失败'
+  }
+
+  snapshot
+  WAS_RUNNING=0; if port_busy "$LISTEN_PORT"; then WAS_RUNNING=1; fi
+  SUB_WAS_RUNNING=0; if port_busy "$SUB_LISTEN_PORT"; then SUB_WAS_RUNNING=1; fi
+  install -d -m 755 /usr/local/sbin
+  install -d -m 750 "$SB_ETC" /var/lib/sing-box
+  install -d -m 750 "$SUB_ETC"
+  install -m 640 "$TMPDIR_WORK/config.json" "$SB_CONFIG"
+  save_state
+
+  addgroup -S sbsub 2>/dev/null || true
+  adduser -S -D -H -G sbsub -s /sbin/nologin sbsub 2>/dev/null || true
+
+  if [ ! -s "$SUB_TOKEN_FILE" ]; then openssl rand -hex 16 > "$SUB_TOKEN_FILE"; fi
+  chmod 600 "$SUB_TOKEN_FILE"
+  printf '%s\n' "$SUB_LISTEN_PORT" > "$SUB_PORT_FILE"
+  chmod 644 "$SUB_PORT_FILE"
+  SUB_TOKEN=$(cat "$SUB_TOKEN_FILE")
+  seed_rules
+  write_services
+  render_subscription
+  write_admin
+  # Keep regeneration available after curl | sh; do not depend on sibling files.
+  write_sub_tool > "$UPDATER.new"
+  chmod 700 "$UPDATER.new"
+  mv -f "$UPDATER.new" "$UPDATER"
+
+  rc-update add sbox default >/dev/null 2>&1 || true
+  rc-update add sb-sub default >/dev/null 2>&1 || true
+  stop_service sbox
+  sleep 1
+  start_service sbox || fail 'sing-box 服务启动失败'
+  sleep 2
+  port_busy "$LISTEN_PORT" || fail 'sing-box 已启动但监听端口不存在'
+  stop_service sb-sub
+  sleep 1
+  start_service sb-sub || fail '订阅服务启动失败'
+  sleep 1
+  curl -fsS --max-time 5 "http://127.0.0.1:$SUB_LISTEN_PORT/$SUB_TOKEN.yaml" >/dev/null \
+    || fail '订阅本地自检失败'
+
+  cat <<INFO
+
+============================================================
+订阅地址（复制到 FlClash 的「订阅」里）：
+
+  http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$SUB_TOKEN.yaml
+
+平台端口映射：
+  代理  $PUBLIC_PORT/tcp  ->  实例 $LISTEN_PORT
+  订阅  $SUB_PUBLIC_PORT/tcp  ->  实例 $SUB_LISTEN_PORT
+
+节点：VLESS + REALITY + Vision（sing-box）
+目标：$REALITY_DEST
+管理：sb-admin
+============================================================
+INFO
+}
+
+verify_node() {
+  need_root
+  [ -f "$SB_STATE" ] || fail '尚未安装节点'
+  load_state
+  socks=$((20000 + ($$ % 20000)))
+  tmp=$(mktemp -d)
+  cat > "$tmp/client.json" <<EOF
+{
+  "log": {"level": "warn"},
+  "inbounds": [{"type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": $socks}],
+  "outbounds": [{
+    "type": "vless", "tag": "proxy",
+    "server": "127.0.0.1", "server_port": $LISTEN_PORT,
+    "uuid": "$CLIENT_UUID", "flow": "xtls-rprx-vision",
+    "tls": {"enabled": true, "server_name": "$REALITY_SERVER_NAME",
+      "utls": {"enabled": true, "fingerprint": "chrome"},
+      "reality": {"enabled": true, "public_key": "$PUBLIC_KEY", "short_id": "$SHORT_ID"}}
+  }]
+}
+EOF
+  sing-box run -c "$tmp/client.json" >"$tmp/log" 2>&1 &
+  pid=$!
+  i=0
+  while [ $i -lt 20 ]; do
+    netstat -ltn 2>/dev/null | grep -q ":$socks " && break
+    kill -0 "$pid" 2>/dev/null || break
+    i=$((i + 1)); sleep 0.25
+  done
+  if netstat -ltn 2>/dev/null | grep -q ":$socks "; then
+    if curl --socks5-hostname "127.0.0.1:$socks" -fsS --max-time 15 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q 'ip='; then
+      echo 'PASS: 链路自检通过'
+      kill "$pid" 2>/dev/null || true
+      rm -rf "$tmp"
+      return 0
+    fi
+    code=$(curl --socks5-hostname "127.0.0.1:$socks" -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$REALITY_SERVER_NAME/" 2>/dev/null || true)
+    case $code in
+      [1-5][0-9][0-9])
+        echo "PASS: 链路自检通过（目标返回 HTTP $code）"
+        kill "$pid" 2>/dev/null || true
+        rm -rf "$tmp"
+        return 0;;
+    esac
+  fi
+  tail -20 "$tmp/log" >&2 || true
+  kill "$pid" 2>/dev/null || true
+  rm -rf "$tmp"
+  fail '链路自检失败；请检查目标站与端口映射'
+}
+
+uninstall_node() {
+  need_root
+  stop_service sbox
+  stop_service sb-sub
+  rc-update del sbox default >/dev/null 2>&1 || true
+  rc-update del sb-sub default >/dev/null 2>&1 || true
+  rm -f /etc/init.d/sbox /etc/init.d/sb-sub /usr/local/bin/sbox-run /usr/local/bin/sb-sub-run "$ADMIN" "$UPDATER" "$SB_CONFIG" "$SB_STATE"
+  rm -rf "$SUB_ROOT"
+  if [ "$PURGE" = 1 ]; then
+    rm -rf "$SUB_ETC"
+    echo '已卸载并删除 /etc/singbox-sub'
+  else
+    echo '已卸载；/etc/singbox-sub 与 /root/singbox-backups 保留'
+  fi
+  echo 'sing-box 软件包保留，可用 apk del sing-box sing-box-openrc 移除。'
+  echo '请同时删除各设备上的客户端配置。'
+}
+
+case $ACTION in
+  install) install_node;;
+  verify) verify_node;;
+  update-sub) update_subscription;;
+  uninstall) uninstall_node;;
+esac

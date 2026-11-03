@@ -23,14 +23,41 @@ token=$(cat /etc/singbox-sub/token)
 curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/sub.yaml || { echo 'FAIL: subscription not served'; exit 1; }
 grep -q 'flow: xtls-rprx-vision' /tmp/sub.yaml || { echo 'FAIL: Vision missing'; exit 1; }
 grep -q 'reality-opts:' /tmp/sub.yaml || { echo 'FAIL: REALITY missing'; exit 1; }
+[ "$(grep -c '^- ' /tmp/sub.yaml)" -eq 8633 ] || { echo 'FAIL: full public rules missing'; exit 1; }
+# Only test containers install Python/YAML; production needs neither.
+python3 tests/check-profile.py /tmp/sub.yaml /etc/sing-box/state rules.template.yaml
+cp /etc/singbox-sub/token /tmp/token-before
+# Simulate a local-only override file: it must never be auto-published.
+printf '%s\n' '- DOMAIN,private-device.example.invalid,DIRECT' > /etc/singbox-sub/private-rules.yaml
+sb-admin --update-sub >/tmp/update.log
+curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/sub.yaml
+if grep -q 'private-device.example.invalid' /tmp/sub.yaml; then echo 'FAIL: private rule merged'; exit 1; fi
 
 sh alpine-singbox.sh --verify || { echo 'FAIL: end-to-end verify'; exit 1; }
 
-before=$(sha256sum /etc/sing-box/state /etc/sing-box/config.json)
+# A public edit survives reinstall and is served after regeneration.
+sed '1i\- DOMAIN,edited.example.invalid,DIRECT' /etc/singbox-sub/rules.yaml >/tmp/custom-rules
+cat /tmp/custom-rules > /etc/singbox-sub/rules.yaml
+sb-admin --update-sub >/tmp/update.log
+curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/before.yaml
+python3 tests/check-profile.py /tmp/before.yaml /etc/sing-box/state /etc/singbox-sub/rules.yaml
+before=$(sha256sum /etc/sing-box/state /etc/sing-box/config.json /etc/singbox-sub/rules.yaml)
 sh alpine-singbox.sh --yes --target www.apple.com:443 >/tmp/reinstall.log 2>&1 || {
   cat /tmp/reinstall.log; exit 1;
 }
-after=$(sha256sum /etc/sing-box/state /etc/sing-box/config.json)
+after=$(sha256sum /etc/sing-box/state /etc/sing-box/config.json /etc/singbox-sub/rules.yaml)
+cmp /tmp/token-before /etc/singbox-sub/token
+curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/after.yaml
+cmp /tmp/before.yaml /tmp/after.yaml
+# Invalid edits cannot replace the served subscription, either via admin or reinstall.
+printf '%s\n' 'proxies: []' > /etc/singbox-sub/rules.yaml
+if sb-admin --update-sub >/tmp/bad-rules.log 2>&1; then echo 'FAIL: invalid rules updated'; exit 1; fi
+curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/after-invalid.yaml
+cmp /tmp/before.yaml /tmp/after-invalid.yaml
+if sh alpine-singbox.sh --yes >/tmp/bad-reinstall.log 2>&1; then echo 'FAIL: invalid rules reinstalled'; exit 1; fi
+curl -fsS "http://127.0.0.1:18996/$token.yaml" >/tmp/after-failed-install.yaml
+cmp /tmp/before.yaml /tmp/after-failed-install.yaml
+cat /tmp/custom-rules > /etc/singbox-sub/rules.yaml
 [ "$before" = "$after" ] || { echo 'FAIL: reinstall changed keys or config'; exit 1; }
 netstat -ltn | grep -q ':18443 ' || { echo 'FAIL: proxy port lost after reinstall'; exit 1; }
 

@@ -73,7 +73,9 @@ sh alpine-singbox.sh --yes
 http://<公网地址>:<订阅公网端口>/<token>.yaml
 ```
 
-导入 FlClash 即可。订阅只带最小规则（`GEOIP,CN,DIRECT` + `MATCH,PROXY`），私有设备规则放 FlClash 本地覆写。
+订阅内置与 Debian 版一致的 **8,633 条已脱敏公共规则**，保持原顺序，导入 FlClash 即可使用完整公共分流。新装会写入 `/etc/singbox-sub/rules.yaml`，重装保留已有文件。NAS、Tailscale、个人内网设备和自有域名等私有规则继续放在 **FlClash 本地覆写**中，前置于公共规则；安装器不读取或上传你的私有客户端配置。
+
+详见 [公共规则与客户端私有规则](docs/rules.md)。原始私有配置在当前设备未定位，因此不会擅自重建或宣称已迁移私有规则。
 
 ## 管理
 
@@ -81,7 +83,10 @@ http://<公网地址>:<订阅公网端口>/<token>.yaml
 sb-admin            # 状态 / 订阅地址 / 重启 / 卸载
 sb-admin --sub      # 只打印订阅地址
 sb-admin --status
+sb-admin --update-sub  # 修改公共 rules.yaml 后重新生成订阅；失败保留旧订阅
 ```
+
+在 FlClash 刷新订阅后生效。重复运行一键脚本也会保留已有公共规则和 token。
 
 ## 自检
 
@@ -136,5 +141,8 @@ sh alpine-singbox.sh --uninstall --purge  # 连 token/订阅状态一起删
 | 文件 | 用途 |
 |---|---|
 | `alpine-singbox.sh` | 单文件安装器 + 管理入口 |
-| `tests/` | Alpine 容器回归 |
+| `src/alpine-singbox.sh.in` | 安装器源文件 |
+| `rules.template.yaml` | 已脱敏公共规则（8,633 条，不含个人设备规则） |
+| `build.py` | 构建/校验单文件脚本；包含内置规则及订阅更新工具 |
+| `tests/` | Alpine 容器回归、规则保留与隐私检查 |
 | `docs/design.md` | 方案取舍、架构与验证记录 |
