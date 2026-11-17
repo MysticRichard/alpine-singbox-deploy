@@ -37,7 +37,7 @@
   |
   +-- REALITY handshake -> 目标站 TLS1.3/h2 伪装
   |
-  +-- 订阅: busybox-extras httpd -> /srv/singbox-sub/<token>.yaml
+  +-- 订阅: busybox-extras httpd CGI -> /srv/singbox-sub/cgi-bin/<token>
 ```
 
 组件：
@@ -60,7 +60,7 @@
 
 - sing-box 以 root 运行（官方包默认行为）；单用户 NAT VPS 可接受
 - 订阅服务降权到 `sbsub`
-- token 600，订阅 YAML 644（token 在文件名里，属于访问控制）
+- token 600，订阅 YAML 644，CGI 只输出套餐额度字段和订阅文件
 - 订阅使用 HTTP；不要公开传播 URL
 - 不修改云平台安全组/NAT 映射，只打印所需规则
 
@@ -103,3 +103,13 @@
 - 容器内 OpenRC 的 `supervise-daemon` 在 stop 时可能卡住；因此服务改用 `start-stop-daemon`。
 - Alpine 3.21/3.22 的 community 仓库没有 `sing-box`，脚本会提示使用 3.23+。
 - `busybox` 本体不含 httpd，需要 `busybox-extras`；脚本会自动安装。
+
+## FlClash 套餐信息与低位订阅端口（2026年11月17日）
+
+- 安装时可填写月流量、重置日和到期日；`sb-admin --plan` 查看。
+- `sb-admin --quota` 手动记录已上传/下载字节，token CGI 通过 `Subscription-Userinfo` 响应头发送用量、总量和到期 Unix 时间。
+- 用量不会自动统计、限流或按月归零；重置日只在服务端查看，FlClash 无通用字段显示。
+- 订阅 OpenRC 服务仍以 `sbsub` 运行，并配置 `cap_net_bind_service`，可监听 1–65535 的内部端口。
+- 新订阅 URL 使用 `/cgi-bin/<token>`；旧 `/<token>.yaml` 静态地址仍保留 YAML，但不附额度响应头。
+- 完整安装回归在 1 CPU / 128 MiB / 无 swap 的 Alpine 3.23 容器通过，含订阅内部端口 80、额度头、规则更新、重装和卸载。
+- 用户报告 FlClash 公网订阅连接失败；地址已脱敏，无法现场复测。真实 NAT 转发与 FlClash 实际导入仍待验收。

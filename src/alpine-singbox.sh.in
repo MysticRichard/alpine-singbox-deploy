@@ -13,6 +13,8 @@ SUB_ROOT=/srv/singbox-sub
 SUB_TOKEN_FILE=$SUB_ETC/token
 SUB_PORT_FILE=$SUB_ETC/port
 RULES=$SUB_ETC/rules.yaml
+PLAN_FILE=$SUB_ETC/provider-plan
+USAGE_FILE=$SUB_ETC/usage
 UPDATER=/usr/local/sbin/sb-sub
 ADMIN=/usr/local/sbin/sb-admin
 BACKUP_ROOT=/root/singbox-backups
@@ -34,7 +36,7 @@ usage() {
   --port PORT               代理公网 TCP 端口
   --listen-port PORT        代理内部 TCP 端口
   --sub-port PORT           订阅公网 TCP 端口
-  --sub-listen-port PORT    订阅内部 TCP 端口（>=1024）
+  --sub-listen-port PORT    订阅内部 TCP 端口
   --target HOST:PORT        REALITY 目标，默认 www.apple.com:443
   --sni NAME                serverName，默认跟随目标
   --yes                     无人值守；所有必填项必须给出
@@ -51,6 +53,9 @@ PUBLIC_PORT=${PUBLIC_PORT:-}
 LISTEN_PORT=${LISTEN_PORT:-}
 SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-}
 SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-}
+PLAN_TOTAL=${PLAN_TOTAL:-}
+PLAN_RESET_DAY=${PLAN_RESET_DAY:-}
+PLAN_EXPIRE=${PLAN_EXPIRE:-}
 REALITY_DEST=${REALITY_DEST:-}
 REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-}
 NONINTERACTIVE=${NONINTERACTIVE:-0}
@@ -143,7 +148,6 @@ validate() {
   valid_port "$LISTEN_PORT" || fail '代理内部端口无效'
   valid_port "$SUB_PUBLIC_PORT" || fail '订阅公网端口无效'
   valid_port "$SUB_LISTEN_PORT" || fail '订阅内部端口无效'
-  [ "$SUB_LISTEN_PORT" -ge 1024 ] || fail '订阅内部端口必须 >=1024'
   [ "$PUBLIC_PORT" != "$SUB_PUBLIC_PORT" ] || fail '代理和订阅的公网端口不能相同'
   [ "$LISTEN_PORT" != "$SUB_LISTEN_PORT" ] || fail '代理和订阅的内部端口不能相同'
   case $REALITY_DEST in *:*) ;; *) fail 'REALITY 目标格式应为 host:port';; esac
@@ -153,6 +157,46 @@ validate() {
   valid_port "$DEST_PORT" || fail 'REALITY 目标端口无效'
   [ -n "$REALITY_SERVER_NAME" ] || REALITY_SERVER_NAME=$DEST_HOST
   [ "$REALITY_SERVER_NAME" = "$DEST_HOST" ] || fail 'serverName 必须与目标主机一致'
+}
+
+load_provider_plan() {
+  [ -f "$PLAN_FILE" ] || return 0
+  PLAN_TOTAL=${PLAN_TOTAL:-$(sed -n 's/^total_display=//p' "$PLAN_FILE")}
+  PLAN_RESET_DAY=${PLAN_RESET_DAY:-$(sed -n 's/^reset_day=//p' "$PLAN_FILE")}
+  PLAN_EXPIRE=${PLAN_EXPIRE:-$(sed -n 's/^expire_date=//p' "$PLAN_FILE")}
+}
+
+validate_plan() {
+  PLAN_TOTAL=${PLAN_TOTAL:-0}
+  PLAN_TOTAL=$(printf '%s' "$PLAN_TOTAL" | tr '[:lower:]' '[:upper:]')
+  PLAN_RESET_DAY=${PLAN_RESET_DAY:-0}
+  PLAN_EXPIRE=${PLAN_EXPIRE:-0}
+  PLAN_TOTAL_BYTES=0
+  PLAN_EXPIRE_EPOCH=0
+  PLAN_EXPIRE_DATE=0
+  if [ "$PLAN_TOTAL" != 0 ]; then
+    case $PLAN_TOTAL in
+      *TB) PLAN_SIZE=${PLAN_TOTAL%TB}; multiplier=1099511627776;;
+      *GB) PLAN_SIZE=${PLAN_TOTAL%GB}; multiplier=1073741824;;
+      *MB) PLAN_SIZE=${PLAN_TOTAL%MB}; multiplier=1048576;;
+      *KB) PLAN_SIZE=${PLAN_TOTAL%KB}; multiplier=1024;;
+      *B) PLAN_SIZE=${PLAN_TOTAL%B}; multiplier=1;;
+      *) fail '套餐流量格式无效；使用 100GB、1TB 或 0';;
+    esac
+    printf '%s\n' "$PLAN_SIZE" | awk '$0 ~ /^[0-9]+([.][0-9]+)?$/ {ok=1} END {exit !ok}' \
+      || fail '套餐流量格式无效；使用 100GB、1TB 或 0'
+    PLAN_TOTAL_BYTES=$(awk -v n="$PLAN_SIZE" -v m="$multiplier" 'BEGIN {printf "%.0f", n*m}')
+  fi
+  case $PLAN_RESET_DAY in [0-9]|[0-9][0-9]) ;; *) fail '流量重置日必须为 0-31';; esac
+  PLAN_RESET_DAY=$(printf '%s\n' "$PLAN_RESET_DAY" | awk '{print $1+0}')
+  [ "$PLAN_RESET_DAY" -le 31 ] || fail '流量重置日必须为 0-31'
+  if [ "$PLAN_EXPIRE" != 0 ]; then
+    case $PLAN_EXPIRE in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) fail '到期日必须为 YYYY-MM-DD 或 0';; esac
+    parsed=$(date -u -d "$PLAN_EXPIRE" +%F 2>/dev/null) || fail '到期日无效'
+    [ "$parsed" = "$PLAN_EXPIRE" ] || fail '到期日无效'
+    PLAN_EXPIRE_EPOCH=$(date -u -d "$PLAN_EXPIRE 23:59:59" +%s) || fail '到期日转换失败'
+    PLAN_EXPIRE_DATE=$PLAN_EXPIRE
+  fi
 }
 
 port_busy() {
@@ -441,6 +485,33 @@ EOF
   fi
   chmod 644 "$sub_tmp"
   mv -f "$sub_tmp" "$SUB_ROOT/$SUB_TOKEN.yaml"
+
+  install -d -m 755 "$SUB_ROOT/cgi-bin"
+  cgi_tmp=$(mktemp "$SUB_ROOT/cgi-bin/.subscription.XXXXXX")
+  cat > "$cgi_tmp" <<CGI
+#!/bin/sh
+set -eu
+printf 'Content-Type: text/yaml; charset=utf-8\\r\\n'
+printf 'Cache-Control: no-store\\r\\n'
+if [ -s '$PLAN_FILE' ] && [ -s '$USAGE_FILE' ]; then
+  total=\$(sed -n 's/^total_bytes=//p' '$PLAN_FILE')
+  expire=\$(sed -n 's/^expire_epoch=//p' '$PLAN_FILE')
+  upload=\$(sed -n '1p' '$USAGE_FILE')
+  download=\$(sed -n '2p' '$USAGE_FILE')
+  case \$total in ''|*[!0-9]*) total=;; esac
+  case \$expire in ''|*[!0-9]*) expire=;; esac
+  case \$upload in ''|*[!0-9]*) upload=;; esac
+  case \$download in ''|*[!0-9]*) download=;; esac
+  if [ -n "\$total" ] && [ -n "\$expire" ] && [ -n "\$upload" ] && [ -n "\$download" ] \
+    && { [ "\$total" -gt 0 ] || [ "\$expire" -gt 0 ] || [ "\$upload" -gt 0 ] || [ "\$download" -gt 0 ]; }; then
+    printf 'Subscription-Userinfo: upload=%s; download=%s; total=%s; expire=%s\\r\\n' "\$upload" "\$download" "\$total" "\$expire"
+  fi
+fi
+printf 'Profile-Update-Interval: 24\\r\\n\\r\\n'
+exec cat '$SUB_ROOT/$SUB_TOKEN.yaml'
+CGI
+  chmod 755 "$cgi_tmp"
+  mv -f "$cgi_tmp" "$SUB_ROOT/cgi-bin/$SUB_TOKEN"
 }
 
 update_subscription() {
@@ -477,12 +548,17 @@ exec $(command -v httpd) -f -p 0.0.0.0:$SUB_LISTEN_PORT -h $SUB_ROOT >>/var/log/
 RUN_EOF
   chmod 755 /usr/local/bin/sb-sub-run
 
-  cat > /etc/init.d/sb-sub <<'SUB_EOF'
+  sub_capability=
+  if [ "$SUB_LISTEN_PORT" -lt 1024 ]; then
+    sub_capability='capabilities="cap_net_bind_service"'
+  fi
+  cat > /etc/init.d/sb-sub <<SUB_EOF
 #!/sbin/openrc-run
 description="sing-box subscription HTTP"
 command="/usr/local/bin/sb-sub-run"
 command_background="yes"
 command_user="sbsub"
+$sub_capability
 pidfile="/run/sb-sub.pid"
 depend() { need net; }
 SUB_EOF
@@ -500,10 +576,35 @@ write_admin() {
 set -eu
 STATE=/etc/sing-box/state
 SUB_ETC=/etc/singbox-sub
+PLAN_FILE=$SUB_ETC/provider-plan
+USAGE_FILE=$SUB_ETC/usage
 case ${1:-} in
-  --sub) . "$STATE"; printf 'http://%s:%s/%s.yaml\n' "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$(cat "$SUB_ETC/token")"; exit;;
+  --sub) . "$STATE"; printf 'http://%s:%s/cgi-bin/%s\n' "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$(cat "$SUB_ETC/token")"; exit;;
   --status) rc-service sbox status; exit;;
   --update-sub) exec /usr/local/sbin/sb-sub;;
+  --plan)
+    [ -s "$PLAN_FILE" ] || { echo '套餐信息：未记录'; exit 1; }
+    total=$(sed -n 's/^total_display=//p' "$PLAN_FILE")
+    reset=$(sed -n 's/^reset_day=//p' "$PLAN_FILE")
+    expire=$(sed -n 's/^expire_date=//p' "$PLAN_FILE")
+    echo "月流量：$total"
+    if [ "$reset" = 0 ]; then echo '重置日：无固定重置日'; else echo "重置日：每月 $reset 日"; fi
+    if [ "$expire" = 0 ]; then echo '到期日：长期有效'; else echo "到期日：$expire"; fi
+    exit;;
+  --quota)
+    . "$STATE"
+    upload=0; download=0
+    [ ! -s "$USAGE_FILE" ] || { upload=$(sed -n '1p' "$USAGE_FILE"); download=$(sed -n '2p' "$USAGE_FILE"); }
+    printf '已上传字节数 [%s]: ' "$upload"; read -r new_upload || exit 1
+    printf '已下载字节数 [%s]: ' "$download"; read -r new_download || exit 1
+    upload=${new_upload:-$upload}; download=${new_download:-$download}
+    case $upload in ''|*[!0-9]*) echo '只接受非负整数' >&2; exit 1;; esac
+    case $download in ''|*[!0-9]*) echo '只接受非负整数' >&2; exit 1;; esac
+    tmp=$(mktemp "$SUB_ETC/.usage.XXXXXX")
+    printf '%s\n%s\n' "$upload" "$download" > "$tmp"
+    chown root:sbsub "$tmp"; chmod 640 "$tmp"; mv -f "$tmp" "$USAGE_FILE"
+    echo '已保存手动用量快照。FlClash 刷新订阅后显示。'
+    exit;;
   --uninstall) ACTION=uninstall;;
 esac
 . "$STATE"
@@ -513,7 +614,7 @@ status() {
   rc-service sb-sub status || true
   echo
   netstat -ltn 2>/dev/null | grep -E ":(${LISTEN_PORT}|${SUB_LISTEN_PORT}) " || true
-  echo "订阅：http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$token.yaml"
+  echo "订阅：http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$token"
 }
 restart() { rc-service sbox restart && rc-service sb-sub restart; }
 uninstall_node() {
@@ -541,16 +642,20 @@ Alpine sing-box 管理
   3. 重启服务
   4. 卸载
   5. 重新生成公共规则订阅
+  6. 查看套餐信息
+  7. 更新订阅用量快照
   0. 退出
 MENU
   printf '选择: '
   read -r opt || exit 0
   case $opt in
     1) status;;
-    2) echo "http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$token.yaml";;
+    2) echo "http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$token";;
     3) restart;;
     4) uninstall_node;;
     5) /usr/local/sbin/sb-sub || echo '规则未发布，原订阅保留';;
+    6) /usr/local/sbin/sb-admin --plan;;
+    7) /usr/local/sbin/sb-admin --quota;;
     0) exit 0;;
     *) echo '无效选项';;
   esac
@@ -565,6 +670,7 @@ install_node() {
   ensure_repo
   ensure_pkg
   load_state
+  load_provider_plan
   if [ "$NONINTERACTIVE" = 1 ]; then
     [ -n "$SERVER_ADDRESS" ] && [ -n "$PUBLIC_PORT" ] && [ -n "$LISTEN_PORT" ] \
       && [ -n "$SUB_PUBLIC_PORT" ] && [ -n "$SUB_LISTEN_PORT" ] \
@@ -578,9 +684,13 @@ install_node() {
     REALITY_DEST=$(ask 'REALITY 目标 host:port' "${REALITY_DEST:-www.apple.com:443}") || exit 1
     REALITY_SERVER_NAME=$(ask 'REALITY serverName' "${REALITY_SERVER_NAME:-${REALITY_DEST%:*}}") || exit 1
     SUB_PUBLIC_PORT=$(ask '订阅公网 TCP 端口' "${SUB_PUBLIC_PORT:-}") || exit 1
-    SUB_LISTEN_PORT=$(ask '订阅内部 TCP 端口（>=1024）' "${SUB_LISTEN_PORT:-}") || exit 1
+    SUB_LISTEN_PORT=$(ask '订阅内部 TCP 端口' "${SUB_LISTEN_PORT:-}") || exit 1
+    PLAN_TOTAL=$(ask '套餐月流量（0=不限，如 100GB）' "${PLAN_TOTAL:-0}") || exit 1
+    PLAN_RESET_DAY=$(ask '流量重置日（0=无固定重置日）' "${PLAN_RESET_DAY:-0}") || exit 1
+    PLAN_EXPIRE=$(ask '套餐到期日（YYYY-MM-DD，0=长期有效）' "${PLAN_EXPIRE:-0}") || exit 1
   fi
   validate
+  validate_plan
   preflight
   if [ -e "$RULES" ]; then validate_rules "$RULES"; fi
 
@@ -616,11 +726,27 @@ install_node() {
 
   addgroup -S sbsub 2>/dev/null || true
   adduser -S -D -H -G sbsub -s /sbin/nologin sbsub 2>/dev/null || true
+  chown root:sbsub "$SUB_ETC"
+  chmod 710 "$SUB_ETC"
 
   if [ ! -s "$SUB_TOKEN_FILE" ]; then openssl rand -hex 16 > "$SUB_TOKEN_FILE"; fi
   chmod 600 "$SUB_TOKEN_FILE"
   printf '%s\n' "$SUB_LISTEN_PORT" > "$SUB_PORT_FILE"
   chmod 644 "$SUB_PORT_FILE"
+  plan_tmp=$(mktemp "$SUB_ETC/.plan.XXXXXX")
+  {
+    printf 'total_display=%s\n' "$PLAN_TOTAL"
+    printf 'total_bytes=%s\n' "$PLAN_TOTAL_BYTES"
+    printf 'reset_day=%s\n' "$PLAN_RESET_DAY"
+    printf 'expire_date=%s\n' "$PLAN_EXPIRE_DATE"
+    printf 'expire_epoch=%s\n' "$PLAN_EXPIRE_EPOCH"
+  } > "$plan_tmp"
+  chown root:sbsub "$plan_tmp"
+  chmod 640 "$plan_tmp"
+  mv -f "$plan_tmp" "$PLAN_FILE"
+  if [ ! -s "$USAGE_FILE" ]; then printf '0\n0\n' > "$USAGE_FILE"; fi
+  chown root:sbsub "$USAGE_FILE"
+  chmod 640 "$USAGE_FILE"
   SUB_TOKEN=$(cat "$SUB_TOKEN_FILE")
   seed_rules
   write_services
@@ -642,7 +768,7 @@ install_node() {
   sleep 1
   start_service sb-sub || fail '订阅服务启动失败'
   sleep 1
-  curl -fsS --max-time 5 "http://127.0.0.1:$SUB_LISTEN_PORT/$SUB_TOKEN.yaml" >/dev/null \
+  curl -fsS --max-time 5 "http://127.0.0.1:$SUB_LISTEN_PORT/cgi-bin/$SUB_TOKEN" >/dev/null \
     || fail '订阅本地自检失败'
 
   cat <<INFO
@@ -650,7 +776,7 @@ install_node() {
 ============================================================
 订阅地址（复制到 FlClash 的「订阅」里）：
 
-  http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/$SUB_TOKEN.yaml
+  http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$SUB_TOKEN
 
 平台端口映射：
   代理  $PUBLIC_PORT/tcp  ->  实例 $LISTEN_PORT

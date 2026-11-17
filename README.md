@@ -55,7 +55,10 @@ curl -fsSL https://raw.githubusercontent.com/MysticRichard/alpine-singbox-deploy
 | 4 | REALITY 目标 | 默认 `www.apple.com:443`，会现场校验 TLS1.3 + h2 + 证书 |
 | 5 | serverName | 默认跟随目标 |
 | 6 | 订阅公网 TCP 端口 | NAT 外部端口 |
-| 7 | 订阅内部 TCP 端口 | 必须 >=1024 |
+| 7 | 订阅内部 TCP 端口 | 支持 1–65535；低于 1024 时服务使用 OpenRC 的绑定端口能力 |
+| 8 | 套餐月流量 | 如 `100GB`、`1TB`（按 1024 进制）；`0` 表示不限 |
+| 9 | 流量重置日 | `1`–`31`；`0` 表示无固定重置日 |
+| 10 | 套餐到期日 | `YYYY-MM-DD`；`0` 表示长期有效 |
 
 无人值守：
 
@@ -64,13 +67,14 @@ NONINTERACTIVE=1 \
 SERVER_ADDRESS=203.0.113.10 \
 PUBLIC_PORT=443 LISTEN_PORT=2082 \
 SUB_PUBLIC_PORT=34441 SUB_LISTEN_PORT=2096 \
+PLAN_TOTAL=100GB PLAN_RESET_DAY=1 PLAN_EXPIRE=2027-12-31 \
 sh alpine-singbox.sh --yes
 ```
 
 装完输出：
 
 ```text
-http://<公网地址>:<订阅公网端口>/<token>.yaml
+http://<公网地址>:<订阅公网端口>/cgi-bin/<token>
 ```
 
 订阅基于 Debian 版规则，剔除 7 条个人公网 IP 后为 **8,626 条公共规则**，保持原顺序，导入 FlClash 即可使用完整公共分流。新装会写入 `/etc/singbox-sub/rules.yaml`，重装保留已有文件。NAS、Tailscale、个人内网设备和自有域名等私有规则继续放在 **FlClash 本地覆写**中，前置于公共规则；安装器不读取或上传你的私有客户端配置。
@@ -83,10 +87,12 @@ http://<公网地址>:<订阅公网端口>/<token>.yaml
 sb-admin            # 状态 / 订阅地址 / 重启 / 卸载
 sb-admin --sub      # 只打印订阅地址
 sb-admin --status
+sb-admin --plan     # 查看套餐流量、重置日和到期日
+sb-admin --quota    # 手动更新已上传/下载字节快照
 sb-admin --update-sub  # 修改公共 rules.yaml 后重新生成订阅；失败保留旧订阅
 ```
 
-在 FlClash 刷新订阅后生效。重复运行一键脚本也会保留已有公共规则和 token。
+订阅响应带有 FlClash 可读取的用量与总量/到期信息。用量是手动快照，不自动计量、限流或按月重置；运行 `sb-admin --quota` 后在 FlClash 刷新。重置日由 `sb-admin --plan` 查看，客户端没有通用的重置日订阅字段。重复运行一键脚本会保留已有公共规则、token 和用量快照。
 
 ## 自检
 
@@ -109,8 +115,9 @@ sh alpine-singbox.sh --uninstall --purge  # 连 token/订阅状态一起删
 
 - `GOMEMLIMIT=40MiB`、`GOGC=30`
 - 不加载 geoip.dat；只监听代理和订阅两个端口
-- 订阅由 `busybox-extras` 的 httpd 提供，无 CGI、无数据库
-- 不提供配额显示；NAT 套餐以供应商后台为准
+- 订阅由 `busybox-extras` 的 httpd 与轻量 CGI 提供，无数据库
+- 订阅服务仍以 `sbsub` 运行；低位内部端口仅增加 `CAP_NET_BIND_SERVICE`
+- 用量和套餐总量不是供应商实时数据，以供应商后台为准
 
 ## 限制
 
@@ -128,8 +135,8 @@ sh alpine-singbox.sh --uninstall --purge  # 连 token/订阅状态一起删
 - 目标 TLS1.3/h2 预检
 - `apk` 安装 `sing-box` / `sing-box-openrc` / `busybox-extras`
 - REALITY + Vision 配置校验
-- OpenRC 启动、端口监听
-- 订阅 HTTP 自检与 YAML 内容校验
+- OpenRC 启动、代理端口与订阅内部 80 端口监听
+- CGI 订阅 HTTP、套餐响应头、手动用量快照与 YAML 内容校验
 - `--verify` 端到端
 - 重装幂等（UUID/密钥/配置哈希不变）
 - 卸载清理
