@@ -694,10 +694,7 @@ install_node() {
   preflight
   if [ -e "$RULES" ]; then validate_rules "$RULES"; fi
 
-  if [ -f "$SB_STATE" ]; then
-    # shellcheck disable=SC1090
-    . "$SB_STATE"
-  else
+  if [ ! -f "$SB_STATE" ]; then
     CLIENT_UUID=$(sing-box generate uuid)
     keys=$(sing-box generate reality-keypair)
     PRIVATE_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^PrivateKey:/ {print $2; exit}')
