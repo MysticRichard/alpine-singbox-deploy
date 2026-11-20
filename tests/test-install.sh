@@ -91,4 +91,18 @@ printf 'yes\n' | sh alpine-singbox.sh --uninstall >/tmp/uninstall.log 2>&1
 [ -d /etc/singbox-sub ] || { echo 'FAIL: subscription state not preserved'; exit 1; }
 [ -d /root/singbox-backups ] || { echo 'FAIL: backups not preserved'; exit 1; }
 
-echo 'PASS: install, subscription, verify, idempotent reinstall and uninstall'
+sh alpine-singbox.sh --yes --server 2001:db8::10 >/tmp/ipv6-install.log 2>&1 || {
+  cat /tmp/ipv6-install.log; exit 1;
+}
+cmp /tmp/token-before /etc/singbox-sub/token
+[ "$(sb-admin --sub)" = "http://[2001:db8::10]:28996/cgi-bin/$token" ] \
+  || { echo 'FAIL: admin printed an incorrect IPv6 subscription URL'; exit 1; }
+grep -F "http://[2001:db8::10]:28996/cgi-bin/$token" /tmp/ipv6-install.log >/dev/null
+sb-admin --update-sub >/tmp/update.log
+curl -gfsS "http://[::1]:80/cgi-bin/$token" >/tmp/ipv6.yaml
+curl -fsS "$sub_url" >/tmp/sub.yaml
+cmp /tmp/sub.yaml /tmp/ipv6.yaml
+python3 tests/check-profile.py /tmp/ipv6.yaml /etc/sing-box/state /etc/singbox-sub/rules.yaml
+sh alpine-singbox.sh --verify
+
+echo 'PASS: IPv4 and IPv6 install, subscription, verify, idempotent reinstall and uninstall'

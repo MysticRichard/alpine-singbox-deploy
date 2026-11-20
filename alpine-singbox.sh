@@ -90,6 +90,36 @@ valid_host() {
   return 0
 }
 
+ipv6_awk() {
+  cat <<'AWK'
+    function ipv6(value, halves,parts,n,i,count,compressed,side) {
+      if (value!~/^[0-9a-fA-F:]+$/) return 0
+      n=split(value,halves,"::")
+      if (n>2) return 0
+      compressed=(n==2)
+      count=0
+      for (side=1;side<=n;side++) {
+        if (halves[side]=="") {if (!compressed) return 0; continue}
+        split(halves[side],parts,":")
+        for (i=1;i<=split(halves[side],parts,":");i++) {
+          if (length(parts[i])<1 || length(parts[i])>4) return 0
+          count++
+        }
+      }
+      return compressed ? count<8 : count==8
+    }
+AWK
+}
+
+valid_server_address() {
+  case $1 in
+    *[!0-9A-Fa-f:]*:*) return 1;;
+    *:*[!0-9A-Fa-f:]*) return 1;;
+    *:*) awk -v address="$1" "$(ipv6_awk)"' BEGIN {exit !ipv6(address)}';;
+    *) valid_host "$1";;
+  esac
+}
+
 need_root() { [ "$(id -u)" -eq 0 ] || fail '请用 root 运行'; }
 
 need_alpine() {
@@ -143,7 +173,7 @@ save_state() {
 }
 
 validate() {
-  valid_host "$SERVER_ADDRESS" || fail '公网地址只能是 IPv4 或域名'
+  valid_server_address "$SERVER_ADDRESS" || fail '公网地址只能是 IPv4、裸 IPv6 或域名'
   valid_port "$PUBLIC_PORT" || fail '代理公网端口无效'
   valid_port "$LISTEN_PORT" || fail '代理内部端口无效'
   valid_port "$SUB_PUBLIC_PORT" || fail '订阅公网端口无效'
@@ -236,7 +266,7 @@ start_service() {
 }
 
 check_target_tls() {
-  probe=$(openssl s_client -4 -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" \
+  probe=$(openssl s_client -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" \
     -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) || {
       printf '%s\n' "$probe" | tail -15 >&2
       fail 'REALITY 目标 TLS 校验失败（检查 VPS 时间、CA 和目标站）'
@@ -331,13 +361,15 @@ on_exit() {
 trap on_exit EXIT
 
 render_config() {
+  bind_address=0.0.0.0
+  if grep -q . /proc/net/if_inet6 2>/dev/null; then bind_address=::; fi
   cat > "$1" <<EOF
 {
   "log": {"level": "warn", "timestamp": true},
   "inbounds": [{
     "type": "vless",
     "tag": "vless-in",
-    "listen": "0.0.0.0",
+    "listen": "$bind_address",
     "listen_port": $LISTEN_PORT,
     "users": [{"uuid": "$CLIENT_UUID", "flow": "xtls-rprx-vision"}],
     "tls": {
@@ -8994,7 +9026,7 @@ __ALPINE_PUBLIC_RULES__
 validate_rules() {
   [ -f "$1" ] || fail '公共规则文件不存在'
   # Do not print rejected content: it could contain a pasted private rule.
-  awk '
+  awk "$(ipv6_awk)"'
     function ipv4(value, a,n,i) {
       # BusyBox awk split(".") is not a reliable IPv4 test; anchor first.
       if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
@@ -9002,22 +9034,6 @@ validate_rules() {
       if (n!=4) return 0
       for (i=1;i<=4;i++) if (a[i]!~/^[0-9]+$/ || a[i]+0>255) return 0
       return 1
-    }
-    function ipv6(value, halves,parts,n,i,count,compressed,side) {
-      if (value!~/^[0-9a-fA-F:]+$/) return 0
-      n=split(value,halves,"::")
-      if (n>2) return 0
-      compressed=(n==2)
-      count=0
-      for (side=1;side<=n;side++) {
-        if (halves[side]=="") {if (!compressed) return 0; continue}
-        split(halves[side],parts,":")
-        for (i=1;i<=split(halves[side],parts,":");i++) {
-          if (length(parts[i])<1 || length(parts[i])>4) return 0
-          count++
-        }
-      }
-      return compressed ? count<8 : count==8
     }
     function cidr(value,v6, a,n) {
       n=split(value,a,"/")
@@ -9088,7 +9104,7 @@ log-level: info
 proxies:
   - name: "Alpine-SingBox"
     type: vless
-    server: $SERVER_ADDRESS
+    server: "$SERVER_ADDRESS"
     port: $PUBLIC_PORT
     uuid: $CLIENT_UUID
     network: tcp
@@ -9173,7 +9189,7 @@ SBOX_EOF
 
   cat > /usr/local/bin/sb-sub-run <<RUN_EOF
 #!/bin/sh
-exec $(command -v httpd) -f -p 0.0.0.0:$SUB_LISTEN_PORT -h $SUB_ROOT >>/var/log/sb-sub.log 2>&1
+exec $(command -v httpd) -f -p $SUB_LISTEN_PORT -h $SUB_ROOT >>/var/log/sb-sub.log 2>&1
 RUN_EOF
   chmod 755 /usr/local/bin/sb-sub-run
 
@@ -9225,6 +9241,36 @@ valid_host() {
   return 0
 }
 
+ipv6_awk() {
+  cat <<'AWK'
+    function ipv6(value, halves,parts,n,i,count,compressed,side) {
+      if (value!~/^[0-9a-fA-F:]+$/) return 0
+      n=split(value,halves,"::")
+      if (n>2) return 0
+      compressed=(n==2)
+      count=0
+      for (side=1;side<=n;side++) {
+        if (halves[side]=="") {if (!compressed) return 0; continue}
+        split(halves[side],parts,":")
+        for (i=1;i<=split(halves[side],parts,":");i++) {
+          if (length(parts[i])<1 || length(parts[i])>4) return 0
+          count++
+        }
+      }
+      return compressed ? count<8 : count==8
+    }
+AWK
+}
+
+valid_server_address() {
+  case $1 in
+    *[!0-9A-Fa-f:]*:*) return 1;;
+    *:*[!0-9A-Fa-f:]*) return 1;;
+    *:*) awk -v address="$1" "$(ipv6_awk)"' BEGIN {exit !ipv6(address)}';;
+    *) valid_host "$1";;
+  esac
+}
+
 load_state() {
   if [ -f "$SB_STATE" ]; then
     # shellcheck disable=SC1090
@@ -9233,7 +9279,7 @@ load_state() {
 }
 
 validate() {
-  valid_host "$SERVER_ADDRESS" || fail '公网地址只能是 IPv4 或域名'
+  valid_server_address "$SERVER_ADDRESS" || fail '公网地址只能是 IPv4、裸 IPv6 或域名'
   valid_port "$PUBLIC_PORT" || fail '代理公网端口无效'
   valid_port "$LISTEN_PORT" || fail '代理内部端口无效'
   valid_port "$SUB_PUBLIC_PORT" || fail '订阅公网端口无效'
@@ -9252,7 +9298,7 @@ validate() {
 validate_rules() {
   [ -f "$1" ] || fail '公共规则文件不存在'
   # Do not print rejected content: it could contain a pasted private rule.
-  awk '
+  awk "$(ipv6_awk)"'
     function ipv4(value, a,n,i) {
       # BusyBox awk split(".") is not a reliable IPv4 test; anchor first.
       if (value !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
@@ -9260,22 +9306,6 @@ validate_rules() {
       if (n!=4) return 0
       for (i=1;i<=4;i++) if (a[i]!~/^[0-9]+$/ || a[i]+0>255) return 0
       return 1
-    }
-    function ipv6(value, halves,parts,n,i,count,compressed,side) {
-      if (value!~/^[0-9a-fA-F:]+$/) return 0
-      n=split(value,halves,"::")
-      if (n>2) return 0
-      compressed=(n==2)
-      count=0
-      for (side=1;side<=n;side++) {
-        if (halves[side]=="") {if (!compressed) return 0; continue}
-        split(halves[side],parts,":")
-        for (i=1;i<=split(halves[side],parts,":");i++) {
-          if (length(parts[i])<1 || length(parts[i])>4) return 0
-          count++
-        }
-      }
-      return compressed ? count<8 : count==8
     }
     function cidr(value,v6, a,n) {
       n=split(value,a,"/")
@@ -9334,7 +9364,7 @@ log-level: info
 proxies:
   - name: "Alpine-SingBox"
     type: vless
-    server: $SERVER_ADDRESS
+    server: "$SERVER_ADDRESS"
     port: $PUBLIC_PORT
     uuid: $CLIENT_UUID
     network: tcp
@@ -9397,6 +9427,14 @@ printf '订阅已更新：%s 条公共规则。请在 FlClash 刷新订阅。\n'
 __ALPINE_SUB_TOOL__
 }
 
+subscription_url() {
+  case $SERVER_ADDRESS in
+    *:*) sub_host="[$SERVER_ADDRESS]";;
+    *) sub_host=$SERVER_ADDRESS;;
+  esac
+  printf 'http://%s:%s/cgi-bin/%s\n' "$sub_host" "$SUB_PUBLIC_PORT" "$1"
+}
+
 write_admin() {
   cat > "$ADMIN" <<'ADMIN_EOF'
 #!/bin/sh
@@ -9405,8 +9443,15 @@ STATE=/etc/sing-box/state
 SUB_ETC=/etc/singbox-sub
 PLAN_FILE=$SUB_ETC/provider-plan
 USAGE_FILE=$SUB_ETC/usage
+subscription_url() {
+  case $SERVER_ADDRESS in
+    *:*) sub_host="[$SERVER_ADDRESS]";;
+    *) sub_host=$SERVER_ADDRESS;;
+  esac
+  printf 'http://%s:%s/cgi-bin/%s\n' "$sub_host" "$SUB_PUBLIC_PORT" "$1"
+}
 case ${1:-} in
-  --sub) . "$STATE"; printf 'http://%s:%s/cgi-bin/%s\n' "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$(cat "$SUB_ETC/token")"; exit;;
+  --sub) . "$STATE"; subscription_url "$(cat "$SUB_ETC/token")"; exit;;
   --status) rc-service sbox status; exit;;
   --update-sub) exec /usr/local/sbin/sb-sub;;
   --plan)
@@ -9441,7 +9486,7 @@ status() {
   rc-service sb-sub status || true
   echo
   netstat -ltn 2>/dev/null | grep -E ":(${LISTEN_PORT}|${SUB_LISTEN_PORT}) " || true
-  echo "订阅：http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$token"
+  echo "订阅：$(subscription_url "$token")"
 }
 restart() { rc-service sbox restart && rc-service sb-sub restart; }
 uninstall_node() {
@@ -9477,7 +9522,7 @@ MENU
   read -r opt || exit 0
   case $opt in
     1) status;;
-    2) echo "http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$token";;
+    2) subscription_url "$token";;
     3) restart;;
     4) uninstall_node;;
     5) /usr/local/sbin/sb-sub || echo '规则未发布，原订阅保留';;
@@ -9600,7 +9645,7 @@ install_node() {
 ============================================================
 订阅地址（复制到 FlClash 的「订阅」里）：
 
-  http://$SERVER_ADDRESS:$SUB_PUBLIC_PORT/cgi-bin/$SUB_TOKEN
+  $(subscription_url "$SUB_TOKEN")
 
 平台端口映射：
   代理  $PUBLIC_PORT/tcp  ->  实例 $LISTEN_PORT
@@ -9617,6 +9662,8 @@ verify_node() {
   need_root
   [ -f "$SB_STATE" ] || fail '尚未安装节点'
   load_state
+  proxy_loopback=127.0.0.1
+  case $SERVER_ADDRESS in *:*) proxy_loopback=::1;; esac
   socks=$((20000 + ($$ % 20000)))
   tmp=$(mktemp -d)
   cat > "$tmp/client.json" <<EOF
@@ -9625,7 +9672,7 @@ verify_node() {
   "inbounds": [{"type": "socks", "tag": "socks", "listen": "127.0.0.1", "listen_port": $socks}],
   "outbounds": [{
     "type": "vless", "tag": "proxy",
-    "server": "127.0.0.1", "server_port": $LISTEN_PORT,
+    "server": "$proxy_loopback", "server_port": $LISTEN_PORT,
     "uuid": "$CLIENT_UUID", "flow": "xtls-rprx-vision",
     "tls": {"enabled": true, "server_name": "$REALITY_SERVER_NAME",
       "utls": {"enabled": true, "fingerprint": "chrome"},

@@ -123,7 +123,8 @@ sh alpine-singbox.sh --uninstall --purge  # 连 token/订阅状态一起删
 
 - 仅 Alpine + OpenRC；Debian/systemd 请用 [personal-xray-deploy](https://github.com/MysticRichard/personal-xray-deploy)
 - 仅 amd64
-- 不支持 IPv6 字面量作为公网地址
+- 公网地址支持 IPv4、裸 IPv6（如 `2001:db8::10`）或域名。IPv6 订阅 URL 自动添加方括号。
+- 通过 IPv6 入站时，客户端须能访问对应 IPv6 端口。纯 IPv6 VPS 还须能访问软件源和 REALITY 握手目标。
 - 订阅是 HTTP；token 只控制访问，不加密传输
 - 不保证 IP 不被封；IP、端口、目标、客户端版本同样重要
 - 目前用 sing-box 客户端自检，FlClash/mihomo 实际导入仍需人工复测

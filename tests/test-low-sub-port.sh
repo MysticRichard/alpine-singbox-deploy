@@ -16,4 +16,10 @@ SUB_LISTEN_PORT=80
 REALITY_DEST=www.apple.com:443
 REALITY_SERVER_NAME=www.apple.com
 validate
+SERVER_ADDRESS=2001:db8::10
+validate
+if (SERVER_ADDRESS=2001:db8:::10; validate) 2>/dev/null; then
+  echo 'FAIL: malformed IPv6 address accepted'
+  exit 1
+fi
 echo 'PASS: subscription internal port 80 is accepted'

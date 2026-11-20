@@ -21,12 +21,14 @@ def function(name):
 helper = '#!/bin/sh\nset -eu\numask 077\n'
 helper += source[source.index('SB_ETC='):source.index('fail() {')]
 helper += "fail() { printf 'ERROR: %s\\n' \"$*\" >&2; exit 1; }\n"
-for name in ('valid_port', 'valid_host', 'load_state', 'validate', 'validate_rules', 'render_subscription'):
+for name in ('valid_port', 'valid_host', 'ipv6_awk', 'valid_server_address',
+             'load_state', 'validate', 'validate_rules', 'render_subscription'):
     helper += function(name) + '\n'
 helper += 'load_state\nvalidate\nSUB_TOKEN=$(cat "$SUB_TOKEN_FILE")\nrender_subscription\n'
 helper += "printf '订阅已更新：%s 条公共规则。请在 FlClash 刷新订阅。\\n' \"$(grep -c '^- ' \"$RULES\")\"\n"
 result = source.replace('__PUBLIC_RULES__', "  cat <<'__ALPINE_PUBLIC_RULES__'\n" + rules.rstrip() + '\n__ALPINE_PUBLIC_RULES__')
 result = result.replace('__SUB_TOOL__', "  cat <<'__ALPINE_SUB_TOOL__'\n" + helper.rstrip() + '\n__ALPINE_SUB_TOOL__')
+result = result.replace('__SUB_URL_FUNCTION__', function('subscription_url').rstrip())
 assert '__SUB_TOOL__' not in result and '__PUBLIC_RULES__' not in result
 out = ROOT / 'alpine-singbox.sh'
 if '--check' in sys.argv:

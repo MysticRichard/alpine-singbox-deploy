@@ -15,6 +15,7 @@ assert node['reality-opts']['short-id'] == state['SHORT_ID']
 assert isinstance(node['reality-opts']['short-id'], str)
 assert state['PRIVATE_KEY'] not in Path(sys.argv[1]).read_text()
 assert node['port'] == int(state['PUBLIC_PORT'])
+assert node['server'] == state['SERVER_ADDRESS']
 for rule in rules:
     fields = rule.split(',')
     policy = fields[-2] if fields[-1] == 'no-resolve' else fields[-1]
